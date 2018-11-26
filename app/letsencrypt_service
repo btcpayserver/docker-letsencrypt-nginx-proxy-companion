@@ -168,12 +168,10 @@ function update_cert {
     local -n hosts_array="$hosts_var"
     # First domain will be our base domain
     local base_domain="${hosts_array[0]}"
-
     local wildcard_certificate='false'
     if [[ "${base_domain:0:2}" == "*." ]]; then
         wildcard_certificate='true'
     fi
-
     local should_restart_container='false'
 
     # Base CLI parameters array, used for both --register-account and --issue
@@ -312,6 +310,11 @@ function update_cert {
             unset accountemail
         fi
     fi
+
+    if ! [[ -z "$accountemail" ]] && [[ "$accountemail" == "<no value>" ]]; then
+        unset accountemail
+    fi
+
     if [[ -n "${accountemail// }" ]]; then
         # If we got an email, use it with the corresponding config home
         config_home="/etc/acme.sh/$accountemail"
@@ -509,6 +512,21 @@ function update_cert {
     # Create directory for the first domain
     mkdir -p "$absolute_certificate_dir"
     set_ownership_and_permissions "$absolute_certificate_dir"
+
+    local temp_hosts_array=()
+    for domain in "${hosts_array[@]}"; do
+        if [[ $domain = *.local ]] || [[ $domain = *.onion ]] || [[ $domain = *.lan ]]; then
+            echo "Skipping update_cert for: ${domain}"
+        else
+            echo "Running update_cert for: ${domain}"
+            temp_hosts_array+=("$domain")
+        fi
+    done
+    hosts_array=("${temp_hosts_array[@]}")
+    if [ ${#hosts_array[@]} -eq 0 ]; then
+        echo "No domain elligible for base domain $base_domain"
+        return
+    fi
 
     for domain in "${hosts_array[@]}"; do
         # Add all the domains to certificate
