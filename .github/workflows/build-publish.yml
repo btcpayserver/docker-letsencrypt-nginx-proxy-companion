@@ -10,7 +10,7 @@ on:
       - dev
       - stable
     tags:
-      - "v*.*.*"
+      - "basedon-v*.*.*"
     paths:
       - ".dockerignore"
       - ".github/workflows/build-publish.yml"
