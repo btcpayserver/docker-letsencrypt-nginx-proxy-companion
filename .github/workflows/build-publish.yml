@@ -2,13 +2,7 @@ name: Build and publish Docker image
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * 1"
   push:
-    branches:
-      - main
-      - dev
-      - stable
     tags:
       - "v*.*.*"
     paths:
@@ -37,9 +31,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ghcr.io/nginx-proxy/acme-companion
-            nginxproxy/acme-companion
-            jrcs/letsencrypt-nginx-proxy-companion
+            btcpayserver/letsencrypt-nginx-proxy-companion
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
