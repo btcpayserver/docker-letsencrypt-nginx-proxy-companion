@@ -1,5 +1,5 @@
 # Use manifest image which support all architecture
-FROM golang:1.11-stretch as builder
+FROM golang:1.12-stretch as builder
 
 ENV VERSION 0.7.4
 
@@ -12,7 +12,7 @@ RUN mkdir -p dist/linux/arm64 && GOOS=linux GOARCH=arm64 go build -o dist/linux/
 
 RUN apt-get update && apt-get install -y --no-install-recommends qemu qemu-user-static qemu-user binfmt-support
 
-FROM arm64v8/alpine:3.8
+FROM arm64v8/alpine:3.9
 
 COPY --from=builder /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64-static
 COPY --from=builder "/go/src/github.com/jwilder/docker-gen/dist/linux/arm64/docker-gen" /usr/local/bin/docker-gen
@@ -24,6 +24,7 @@ ENV DEBUG=false \
 RUN apk add --update \
         bash \
         ca-certificates \
+        coreutils \
         curl \
         jq \
         openssl \
