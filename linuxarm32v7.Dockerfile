@@ -15,7 +15,7 @@ RUN mkdir /tmp/bin && \
     echo "$BIN_SHA256 docker-gen.tar.gz" | sha256sum -c - && \
     tar -xzvf docker-gen.tar.gz -C /tmp/bin
 
-FROM arm32v6/alpine:3.8
+FROM arm32v6/alpine:3.9
 
 LABEL maintainer="Yves Blusseau <90z7oey02@sneakemail.com> (@blusseau)"
 COPY --from=builder "/tmp/bin" /usr/local/bin
@@ -28,6 +28,7 @@ ENV DEBUG=false \
 RUN apk add --update \
         bash \
         ca-certificates \
+        coreutils \
         curl \
         jq \
         openssl \
