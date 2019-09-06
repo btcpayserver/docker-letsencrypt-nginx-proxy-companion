@@ -8,15 +8,19 @@ ACME_CA_URI="${ACME_CA_URI:-https://acme-v01.api.letsencrypt.org/directory}"
 DEFAULT_KEY_SIZE=4096
 REUSE_ACCOUNT_KEYS="$(lc ${REUSE_ACCOUNT_KEYS:-true})"
 REUSE_PRIVATE_KEYS="$(lc ${REUSE_PRIVATE_KEYS:-false})"
+MIN_VALIDITY_CAP=7603200
+DEFAULT_MIN_VALIDITY=2592000
 
 function create_link {
     local -r source=${1?missing source argument}
     local -r target=${2?missing target argument}
     if [[ -f "$target" ]] && [[ "$(readlink "$target")" == "$source" ]]; then
-      [[ $DEBUG == true ]] && echo "$target already linked to $source"
+      set_ownership_and_permissions "$target"
+      [[ "$(lc $DEBUG)" == true ]] && echo "$target already linked to $source"
       return 1
     else
-      ln -sf "$source" "$target"
+      ln -sf "$source" "$target" \
+        && set_ownership_and_permissions "$target"
     fi
 }
 
@@ -57,7 +61,7 @@ function cleanup_links {
         symlinked_domain="${symlinked_domain%*.crt}"
         SYMLINKED_DOMAINS+=("$symlinked_domain")
     done
-    [[ $DEBUG == true ]] && echo "Symlinked domains: ${SYMLINKED_DOMAINS[*]}"
+    [[ "$(lc $DEBUG)" == true ]] && echo "Symlinked domains: ${SYMLINKED_DOMAINS[*]}"
 
     # Create an array containing domains that are considered
     # enabled (ie present on /app/letsencrypt_service_data).
@@ -71,7 +75,7 @@ function cleanup_links {
         ENABLED_DOMAINS+=("$domain")
       done
     done
-    [[ $DEBUG == true ]] && echo "Enabled domains: ${ENABLED_DOMAINS[*]}"
+    [[ "$(lc $DEBUG)" == true ]] && echo "Enabled domains: ${ENABLED_DOMAINS[*]}"
 
     # Create an array containing only domains for which a symlinked private key exists
     # in /etc/nginx/certs but that no longer have a corresponding LETSENCRYPT_HOST set
@@ -82,28 +86,28 @@ function cleanup_links {
                                              "${ENABLED_DOMAINS[@]}" \
                                              | tr ' ' '\n' | sort | uniq -u)
     fi
-    [[ $DEBUG == true ]] && echo "Disabled domains: ${DISABLED_DOMAINS[*]}"
+    [[ "$(lc $DEBUG)" == true ]] && echo "Disabled domains: ${DISABLED_DOMAINS[*]}"
 
 
     # Remove disabled domains symlinks if present.
     # Return 1 if nothing was removed and 0 otherwise.
     if [[ ${#DISABLED_DOMAINS[@]} -gt 0 ]]; then
-      [[ $DEBUG == true ]] && echo "Some domains are disabled :"
+      [[ "$(lc $DEBUG)" == true ]] && echo "Some domains are disabled :"
       for disabled_domain in "${DISABLED_DOMAINS[@]}"; do
-          [[ $DEBUG == true ]] && echo "Checking domain ${disabled_domain}"
+          [[ "$(lc $DEBUG)" == true ]] && echo "Checking domain ${disabled_domain}"
           cert_folder="$(readlink -f /etc/nginx/certs/${disabled_domain}.crt)"
           # If the dotfile is absent, skip domain.
           if [[ ! -e "${cert_folder%/*}/.companion" ]]; then
-              [[ $DEBUG == true ]] && echo "No .companion file found in ${cert_folder}. ${disabled_domain} is not managed by letsencrypt-nginx-proxy-companion. Skipping domain."
+              [[ "$(lc $DEBUG)" == true ]] && echo "No .companion file found in ${cert_folder}. ${disabled_domain} is not managed by letsencrypt-nginx-proxy-companion. Skipping domain."
               continue
           else
-              [[ $DEBUG == true ]] && echo "${disabled_domain} is managed by letsencrypt-nginx-proxy-companion. Removing unused symlinks."
+              [[ "$(lc $DEBUG)" == true ]] && echo "${disabled_domain} is managed by letsencrypt-nginx-proxy-companion. Removing unused symlinks."
           fi
 
           for extension in .crt .key .dhparam.pem .chain.pem; do
               file="${disabled_domain}${extension}"
               if [[ -n "${file// }" ]] && [[ -L "/etc/nginx/certs/${file}" ]]; then
-                  [[ $DEBUG == true ]] && echo "Removing /etc/nginx/certs/${file}"
+                  [[ "$(lc $DEBUG)" == true ]] && echo "Removing /etc/nginx/certs/${file}"
                   rm -f "/etc/nginx/certs/${file}"
               fi
           done
@@ -127,6 +131,7 @@ function update_certs {
 
     should_reload_nginx='false'
     for cid in "${LETSENCRYPT_CONTAINERS[@]}"; do
+        should_restart_container='false'
         # Derive host and email variable names
         host_varname="LETSENCRYPT_${cid}_HOST"
         # Array variable indirection hack: http://stackoverflow.com/a/25880676/350221
@@ -144,10 +149,13 @@ function update_certs {
 
         params_d_str=""
 
+        # Use container's LETSENCRYPT_EMAIL if set, fallback to DEFAULT_EMAIL
         email_varname="LETSENCRYPT_${cid}_EMAIL"
         email_address="${!email_varname}"
         if [[ "$email_address" != "<no value>" ]]; then
             params_d_str+=" --email $email_address"
+        elif [[ -n "${DEFAULT_EMAIL:-}" ]]; then
+            params_d_str+=" --email $DEFAULT_EMAIL"
         fi
 
         keysize_varname="LETSENCRYPT_${cid}_KEYSIZE"
@@ -176,9 +184,30 @@ function update_certs {
             account_alias=default
         fi
 
-        [[ $DEBUG == true ]] && params_d_str+=" -v"
+        [[ "$(lc $DEBUG)" == true ]] && params_d_str+=" -v"
         [[ $REUSE_PRIVATE_KEYS == true ]] && params_d_str+=" --reuse_key"
-        [[ "${1}" == "--force-renew" ]] && params_d_str+=" --valid_min 7776000"
+
+        min_validity="LETSENCRYPT_${cid}_MIN_VALIDITY"
+        min_validity="${!min_validity}"
+        if [[ "$min_validity" == "<no value>" ]]; then
+            min_validity=$DEFAULT_MIN_VALIDITY
+        fi
+        # Sanity Check
+        # Upper Bound
+        if [[ $min_validity -gt $MIN_VALIDITY_CAP ]]; then
+            min_validity=$MIN_VALIDITY_CAP
+        fi
+        # Lower Bound
+        if [[ $min_validity -lt $(($seconds_to_wait * 2)) ]]; then
+            min_validity=$(($seconds_to_wait * 2))
+        fi
+
+        if [[ "${1}" == "--force-renew" ]]; then
+            # Manually set to highest certificate lifetime given by LE CA
+            params_d_str+=" --valid_min 7776000"
+        else
+            params_d_str+=" --valid_min $min_validity"
+        fi
 
         # Create directory for the first domain,
         # make it root readable only and make it the cwd
@@ -201,10 +230,12 @@ function update_certs {
             if [[ -f "$account_key_full_path" ]]; then
                 # If there is no symlink to the account key, create it
                 if [[ ! -L ./account_key.json ]]; then
-                    ln -sf "$account_key_full_path" ./account_key.json
+                    ln -sf "$account_key_full_path" ./account_key.json \
+                      && set_ownership_and_permissions ./account_key.json
                 # If the symlink target the wrong account key, replace it
                 elif [[ "$(readlink -f ./account_key.json)" != "$account_key_full_path" ]]; then
-                    ln -sf "$account_key_full_path" ./account_key.json
+                    ln -sf "$account_key_full_path" ./account_key.json \
+                      && set_ownership_and_permissions ./account_key.json
                 fi
             fi
         fi
@@ -234,16 +265,16 @@ function update_certs {
         if [[ $simp_le_return -ne 2 ]]; then
           for domain in "${hosts_array[@]}"; do
             if [[ "$acme_ca_uri" == "$le_staging_uri" ]]; then
-              create_links "_test_$base_domain" "$domain" && should_reload_nginx='true'
+              create_links "_test_$base_domain" "$domain" && should_reload_nginx='true' && should_restart_container='true'
             else
-              create_links "$base_domain" "$domain" && should_reload_nginx='true'
+              create_links "$base_domain" "$domain" && should_reload_nginx='true' && should_restart_container='true'
             fi
             touch "${certificate_dir}/.companion"
             set_ownership_and_permissions "${certificate_dir}/.companion"
           done
           # Make private key root readable only
-          for filename in cert key chain fullchain; do
-            set_ownership_and_permissions "${certificate_dir}/${filename}.pem"
+          for file in cert.pem key.pem chain.pem fullchain.pem account_key.json; do
+            set_ownership_and_permissions "${certificate_dir}/${file}"
           done
           # Make the account key and its parent folders (up to
           # /etc/nginx/certs/accounts included) root readable only
@@ -253,7 +284,14 @@ function update_certs {
             account_key_perm_path="$(dirname "$account_key_perm_path")"
           done
           # Queue nginx reload if a certificate was issued or renewed
-          [[ $simp_le_return -eq 0 ]] && should_reload_nginx='true'
+          [[ $simp_le_return -eq 0 ]] && should_reload_nginx='true' && should_restart_container='true'
+        fi
+
+        # Restart container if certs are updated and the respective environmental variable is set
+        restart_container_var="LETSENCRYPT_${cid}_RESTART_CONTAINER"
+        if [[ $(lc "${!restart_container_var:-}") == true ]] && [[ "$should_restart_container" == 'true' ]]; then
+            echo "Restarting container (${cid})..."
+            docker_restart "${cid}"
         fi
 
     done

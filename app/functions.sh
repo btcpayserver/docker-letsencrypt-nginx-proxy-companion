@@ -25,25 +25,34 @@ fi
 
 function add_location_configuration {
     local domain="${1:-}"
+    # If no domain was passed or if the domain has no custom conf, use default instead
     [[ -z "$domain" || ! -f "${VHOST_DIR}/${domain}" ]] && domain=default
-    [[ -f "${VHOST_DIR}/${domain}" && \
-       -n $(sed -n "/$START_HEADER/,/$END_HEADER/p" "${VHOST_DIR}/${domain}") ]] && return 0
-    echo "$START_HEADER" > "${VHOST_DIR}/${domain}".new
-    cat /app/nginx_location.conf >> "${VHOST_DIR}/${domain}".new
-    echo "$END_HEADER" >> "${VHOST_DIR}/${domain}".new
-    [[ -f "${VHOST_DIR}/${domain}" ]] && cat "${VHOST_DIR}/${domain}" >> "${VHOST_DIR}/${domain}".new
-    mv -f "${VHOST_DIR}/${domain}".new "${VHOST_DIR}/${domain}"
-    return 1
+
+    if [[ -f "${VHOST_DIR}/${domain}" && -n $(sed -n "/$START_HEADER/,/$END_HEADER/p" "${VHOST_DIR}/${domain}") ]]; then
+        # If the config file exist and already have the location configuration, end with exit code 0
+        return 0
+    else
+        # Else write the location configuration to a temp file ...
+        echo "$START_HEADER" > "${VHOST_DIR}/${domain}".new
+        cat /app/nginx_location.conf >> "${VHOST_DIR}/${domain}".new
+        echo "$END_HEADER" >> "${VHOST_DIR}/${domain}".new
+        # ... append the existing file content to the temp one ...
+        [[ -f "${VHOST_DIR}/${domain}" ]] && cat "${VHOST_DIR}/${domain}" >> "${VHOST_DIR}/${domain}".new
+        # ... and copy the temp file to the old one (if the destination file is bind mounted, you can't change
+        # its inode from within the container, so mv won't work and cp has to be used), then remove the temp file.
+        cp -f "${VHOST_DIR}/${domain}".new "${VHOST_DIR}/${domain}" && rm -f "${VHOST_DIR}/${domain}".new
+        return 1
+    fi
 }
 
 function remove_all_location_configurations {
-    local old_shopt_options=$(shopt -p) # Backup shopt options
-    shopt -s nullglob
     for file in "${VHOST_DIR}"/*; do
-        [[ -n $(sed -n "/$START_HEADER/,/$END_HEADER/p" "$file") ]] && \
-         sed -i "/$START_HEADER/,/$END_HEADER/d" "$file"
+        [[ -e "$file" ]] || continue
+        if [[ -n $(sed -n "/$START_HEADER/,/$END_HEADER/p" "$file") ]]; then
+            sed "/$START_HEADER/,/$END_HEADER/d" "$file" > "$file".new
+            cp -f "$file".new "$file" && rm -f "$file".new
+        fi
     done
-    eval "$old_shopt_options" # Restore shopt options
 }
 
 function check_cert_min_validity {
@@ -60,22 +69,26 @@ function check_cert_min_validity {
 }
 
 function get_self_cid {
-    DOCKER_PROVIDER=${DOCKER_PROVIDER:-docker}
+    local self_cid=""
 
-    case "${DOCKER_PROVIDER}" in
-    ecs|ECS)
-        # AWS ECS. Enabled in /etc/ecs/ecs.config (http://docs.aws.amazon.com/AmazonECS/latest/developerguide/container-metadata.html)
-        if [[ -n "${ECS_CONTAINER_METADATA_FILE:-}" ]]; then
-            grep ContainerID "${ECS_CONTAINER_METADATA_FILE}" | sed 's/.*: "\(.*\)",/\1/g'
-        else
-            echo "${DOCKER_PROVIDER} specified as 'ecs' but not available. See: http://docs.aws.amazon.com/AmazonECS/latest/developerguide/container-metadata.html" >&2
-            exit 1
-        fi
-        ;;
-    *)
-        sed -nE 's/^.+docker[\/-]([a-f0-9]{64}).*/\1/p' /proc/self/cgroup | head -n 1
-        ;;
-    esac
+    # Try the /proc files methods first then resort to the Docker API.
+    if [[ -f /proc/1/cpuset ]]; then
+        self_cid="$(grep -Eo '[[:alnum:]]{64}' /proc/1/cpuset)"
+    fi
+    if [[ ( ${#self_cid} != 64 ) && ( -f /proc/self/cgroup ) ]]; then
+        self_cid="$(grep -Eo -m 1 '[[:alnum:]]{64}' /proc/self/cgroup)"
+    fi
+    if [[ ( ${#self_cid} != 64 ) ]]; then
+        self_cid="$(docker_api "/containers/$(hostname)/json" | jq -r '.Id')"
+    fi
+
+    # If it's not 64 characters long, then it's probably not a container ID.
+    if [[ ${#self_cid} == 64 ]]; then
+        echo "$self_cid"
+    else
+        echo "$(date "+%Y/%m/%d %T"), Error: can't get my container ID !" >&2
+        return 1
+    fi
 }
 
 ## Docker API
@@ -112,6 +125,11 @@ function docker_exec {
         echo "$(date "+%Y/%m/%d %T"), Error: can't exec command ${cmd} in container ${id}. Check if the container is running." >&2
         return 1
     fi
+}
+
+function docker_restart {
+    local id="${1?missing id}"
+    docker_api "/containers/$id/restart" "POST"
 }
 
 function docker_kill {
@@ -157,8 +175,8 @@ function get_nginx_proxy_container {
         if [[ -n "${NGINX_PROXY_CONTAINER:-}" ]]; then
             nginx_cid="$NGINX_PROXY_CONTAINER"
         # ... else try to get the container ID with the volumes_from method.
-        else
-            volumes_from=$(docker_api "/containers/${SELF_CID:-$(get_self_cid)}/json" | jq -r '.HostConfig.VolumesFrom[]' 2>/dev/null)
+        elif [[ $(get_self_cid) ]]; then
+            volumes_from=$(docker_api "/containers/$(get_self_cid)/json" | jq -r '.HostConfig.VolumesFrom[]' 2>/dev/null)
             for cid in $volumes_from; do
                 cid="${cid%:*}" # Remove leading :ro or :rw set by remote docker-compose (thx anoopr)
                 if [[ $(docker_api "/containers/$cid/json" | jq -r '.Config.Env[]' | egrep -c '^NGINX_VERSION=') = "1" ]];then
@@ -223,7 +241,7 @@ function set_ownership_and_permissions {
   elif id -u "$user" > /dev/null 2>&1; then
     # Convert the user name to numeric ID
     local user_num="$(id -u "$user")"
-    [[ $DEBUG == true ]] && echo "Debug: numeric ID of user $user is $user_num."
+    [[ "$(lc $DEBUG)" == true ]] && echo "Debug: numeric ID of user $user is $user_num."
   else
     echo "Warning: user $user not found in the container, please use a numeric user ID instead of a user name. Skipping ownership and permissions check."
     return 1
@@ -236,7 +254,7 @@ function set_ownership_and_permissions {
   elif getent group "$group" > /dev/null 2>&1; then
     # Convert the group name to numeric ID
     local group_num="$(getent group "$group" | awk -F ':' '{print $3}')"
-    [[ $DEBUG == true ]] && echo "Debug: numeric ID of group $group is $group_num."
+    [[ "$(lc $DEBUG)" == true ]] && echo "Debug: numeric ID of group $group is $group_num."
   else
     echo "Warning: group $group not found in the container, please use a numeric group ID instead of a group name. Skipping ownership and permissions check."
     return 1
@@ -245,35 +263,38 @@ function set_ownership_and_permissions {
   # Check and modify ownership if required.
   if [[ -e "$path" ]]; then
     if [[ "$(stat -c %u:%g "$path" )" != "$user_num:$group_num" ]]; then
-      [[ $DEBUG == true ]] && echo "Debug: setting $path ownership to $user:$group."
-      chown "$user_num:$group_num" "$path"
+      [[ "$(lc $DEBUG)" == true ]] && echo "Debug: setting $path ownership to $user:$group."
+      if [[ -L "$path" ]]; then
+        chown -h "$user_num:$group_num" "$path"
+      else
+        chown "$user_num:$group_num" "$path"
+      fi
+    fi
+    # If the path is a folder, check and modify permissions if required.
+    if [[ -d "$path" ]]; then
+      if [[ "$(stat -c %a "$path")" != "$d_perms" ]]; then
+        [[ "$(lc $DEBUG)" == true ]] && echo "Debug: setting $path permissions to $d_perms."
+        chmod "$d_perms" "$path"
+      fi
+    # If the path is a file, check and modify permissions if required.
+    elif [[ -f "$path" ]]; then
+      # Use different permissions for private files (private keys and ACME account keys) ...
+      if [[ "$path" =~ ^.*(default\.key|key\.pem|\.json)$ ]]; then
+        if [[ "$(stat -c %a "$path")" != "$f_perms" ]]; then
+          [[ "$(lc $DEBUG)" == true ]] && echo "Debug: setting $path permissions to $f_perms."
+          chmod "$f_perms" "$path"
+        fi
+      # ... and for public files (certificates, chains, fullchains, DH parameters).
+      else
+        if [[ "$(stat -c %a "$path")" != "644" ]]; then
+          [[ "$(lc $DEBUG)" == true ]] && echo "Debug: setting $path permissions to 644."
+          chmod "644" "$path"
+        fi
+      fi
     fi
   else
     echo "Warning: $path does not exist. Skipping ownership and permissions check."
     return 1
-  fi
-
-  # If the path is a folder, check and modify permissions if required.
-  if [[ -d "$path" ]]; then
-    if [[ "$(stat -c %a "$path")" != "$d_perms" ]]; then
-      [[ $DEBUG == true ]] && echo "Debug: setting $path permissions to $d_perms."
-      chmod "$d_perms" "$path"
-    fi
-  # If the path is a file, check and modify permissions if required.
-elif [[ -f "$path" ]]; then
-    # Use different permissions for private files (private keys and ACME account keys) ...
-    if [[ "$path" =~ ^.*(default\.key|key\.pem|\.json)$ ]]; then
-      if [[ "$(stat -c %a "$path")" != "$f_perms" ]]; then
-        [[ $DEBUG == true ]] && echo "Debug: setting $path permissions to $f_perms."
-        chmod "$f_perms" "$path"
-      fi
-    # ... and for public files (certificates, chains, fullchains, DH parameters).
-    else
-      if [[ "$(stat -c %a "$path")" != "644" ]]; then
-        [[ $DEBUG == true ]] && echo "Debug: setting $path permissions to 644."
-        chmod "$f_perms" "$path"
-      fi
-    fi
   fi
 }
 
