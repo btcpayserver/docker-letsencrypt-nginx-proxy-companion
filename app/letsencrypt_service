@@ -135,8 +135,15 @@ function update_certs {
         # Derive host and email variable names
         host_varname="LETSENCRYPT_${cid}_HOST"
         # Array variable indirection hack: http://stackoverflow.com/a/25880676/350221
-        hosts_array="${host_varname}[@]"
-        hosts_array_expanded=("${!hosts_array}")
+        hosts_array_unfiltered="${host_varname}[@]"
+        hosts_array=()
+        for domain in "${!hosts_array_unfiltered}"; do
+          [[ $domain != *.local ]] && \
+          [[ $domain != *.onion ]] && \
+          [[ $domain != *.lan ]]  && hosts_array+=( $domain )
+        done
+
+        hosts_array_expanded=("${hosts_array[@]}")
         # First domain will be our base domain
         base_domain="${hosts_array_expanded[0]}"
 
@@ -208,7 +215,7 @@ function update_certs {
         set_ownership_and_permissions "$certificate_dir"
         pushd "$certificate_dir" || return
 
-        for domain in "${!hosts_array}"; do
+        for domain in "${hosts_array[@]}"; do
             # Add all the domains to certificate
             params_d_str+=" -d $domain"
             # Add location configuration for the domain
@@ -272,7 +279,7 @@ function update_certs {
         popd || return
 
         if [[ $simp_le_return -ne 2 ]]; then
-          for domain in "${!hosts_array}"; do
+          for domain in "${hosts_array[@]}"; do
             if [[ "$acme_ca_uri" == "$le_staging_uri" ]]; then
               create_links "_test_$base_domain" "$domain" && should_reload_nginx='true' && should_restart_container='true'
             else
