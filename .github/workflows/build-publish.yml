@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "v*.*.*"
+      - "v*"
     paths:
       - ".dockerignore"
       - ".github/workflows/build-publish.yml"
