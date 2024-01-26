@@ -429,3 +429,21 @@ function set_ownership_and_permissions {
     return 1
   fi
 }
+
+function load_acme_ca_uri {
+  if [[ "$ACME_CA_URI" == "https://acme-v01.api.letsencrypt.org/directory" ]] || \
+      [[ "$ACME_CA_URI" == "production" ]] || \
+      [[ "$ACME_CA_URI" == "prod" ]]; then
+      original_acme="$ACME_CA_URI"
+      export ACME_CA_URI="https://acme-v02.api.letsencrypt.org/directory"
+      echo "Info: Rewriting ACME_CA_URI from $original_acme to $ACME_CA_URI"
+  fi
+
+  if [[ "$ACME_CA_URI" == "https://acme-staging.api.letsencrypt.org/directory" ]] || \
+    [[ "$ACME_CA_URI" == "staging" ]] || \
+    [[ "$ACME_CA_URI" == "test" ]]; then
+      original_acme="$ACME_CA_URI"
+      export ACME_CA_URI="https://acme-staging-v02.api.letsencrypt.org/directory"
+      echo "Info: Rewriting ACME_CA_URI from $original_acme to $ACME_CA_URI"
+  fi
+}
