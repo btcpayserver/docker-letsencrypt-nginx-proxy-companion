@@ -3,6 +3,8 @@
 # shellcheck source=functions.sh
 source /app/functions.sh
 
+load_acme_ca_uri
+
 CERTS_UPDATE_INTERVAL="${CERTS_UPDATE_INTERVAL:-3600}"
 ACME_CA_URI="${ACME_CA_URI:-"https://acme-v02.api.letsencrypt.org/directory"}"
 ACME_CA_TEST_URI="https://acme-staging-v02.api.letsencrypt.org/directory"
