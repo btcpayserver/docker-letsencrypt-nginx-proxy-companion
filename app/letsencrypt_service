@@ -168,6 +168,22 @@ function update_cert {
     local hosts_var
     hosts_var="$(get_hosts_array_var "$cid")" || return 1
     local -n hosts_array="$hosts_var"
+
+    local eligible_hosts=()
+    for domain in "${hosts_array[@]}"; do
+        if [[ $domain == *.local ]] || [[ $domain == *.onion ]] || [[ $domain == *.lan ]]; then
+            echo "Skipping update_cert for: ${domain}"
+        else
+            echo "Running update_cert for: ${domain}"
+            eligible_hosts+=("$domain")
+        fi
+    done
+    hosts_array=("${eligible_hosts[@]}")
+    if [[ ${#hosts_array[@]} -eq 0 ]]; then
+        echo "No ACME-eligible domains for container $cid"
+        return
+    fi
+
     # First domain will be our base domain
     local base_domain="${hosts_array[0]}"
     local wildcard_certificate='false'
@@ -514,21 +530,6 @@ function update_cert {
     # Create directory for the first domain
     mkdir -p "$absolute_certificate_dir"
     set_ownership_and_permissions "$absolute_certificate_dir"
-
-    local temp_hosts_array=()
-    for domain in "${hosts_array[@]}"; do
-        if [[ $domain = *.local ]] || [[ $domain = *.onion ]] || [[ $domain = *.lan ]]; then
-            echo "Skipping update_cert for: ${domain}"
-        else
-            echo "Running update_cert for: ${domain}"
-            temp_hosts_array+=("$domain")
-        fi
-    done
-    hosts_array=("${temp_hosts_array[@]}")
-    if [ ${#hosts_array[@]} -eq 0 ]; then
-        echo "No domain elligible for base domain $base_domain"
-        return
-    fi
 
     for domain in "${hosts_array[@]}"; do
         # Add all the domains to certificate
