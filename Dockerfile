@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM docker.io/nginxproxy/docker-gen:0.17.2 AS docker-gen
+FROM docker.io/btcpayserver/docker-gen:0.17.2-2 AS docker-gen
 
 FROM docker.io/library/alpine:3.24.1
 
@@ -13,6 +13,7 @@ ENV ACMESH_VERSION=${ACMESH_VERSION} \
 
 # Install packages required by the image
 RUN apk add --no-cache --virtual .bin-deps \
+    "ca-certificates>=20261020-r0" \
     bash \
     bind-tools \
     coreutils \
